@@ -118,6 +118,7 @@ export async function getFeishuMemberInfo(
     description: user?.description,
     job_title: user?.job_title,
     geo: user?.geo,
+    gender: user?.gender,
   };
 }
 
