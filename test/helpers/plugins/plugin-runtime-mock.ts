@@ -131,6 +131,7 @@ export function createPluginRuntimeMock(overrides: DeepPartial<PluginRuntime> = 
     },
     system: {
       enqueueSystemEvent: vi.fn() as unknown as PluginRuntime["system"]["enqueueSystemEvent"],
+      requestHeartbeat: vi.fn() as unknown as PluginRuntime["system"]["requestHeartbeat"],
       requestHeartbeatNow: vi.fn() as unknown as PluginRuntime["system"]["requestHeartbeatNow"],
       runHeartbeatOnce: vi.fn(async () => ({
         status: "ran" as const,

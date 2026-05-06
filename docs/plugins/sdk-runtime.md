@@ -1,427 +1,857 @@
----
-title: "Plugin Runtime Helpers"
-sidebarTitle: "Runtime Helpers"
-summary: "api.runtime -- the injected runtime helpers available to plugins"
-read_when:
-  - You need to call core helpers from a plugin (TTS, STT, image gen, web search, subagent)
-  - You want to understand what api.runtime exposes
-  - You are accessing config, agent, or media helpers from plugin code
----
-
-# Plugin Runtime Helpers
-
-Reference for the `api.runtime` object injected into every plugin during
-registration. Use these helpers instead of importing host internals directly.
-
-<Tip>
-  **Looking for a walkthrough?** See [Channel Plugins](/plugins/sdk-channel-plugins)
-  or [Provider Plugins](/plugins/sdk-provider-plugins) for step-by-step guides
-  that show these helpers in context.
-</Tip>
-
-```typescript
-register(api) {
-  const runtime = api.runtime;
-}
-```
-
-## Runtime namespaces
-
-### `api.runtime.agent`
-
-Agent identity, directories, and session management.
-
-```typescript
-// Resolve the agent's working directory
-const agentDir = api.runtime.agent.resolveAgentDir(cfg);
-
-// Resolve agent workspace
-const workspaceDir = api.runtime.agent.resolveAgentWorkspaceDir(cfg);
-
-// Get agent identity
-const identity = api.runtime.agent.resolveAgentIdentity(cfg);
-
-// Get default thinking level
-const thinking = api.runtime.agent.resolveThinkingDefault(cfg, provider, model);
-
-// Get agent timeout
-const timeoutMs = api.runtime.agent.resolveAgentTimeoutMs(cfg);
-
-// Ensure workspace exists
-await api.runtime.agent.ensureAgentWorkspace(cfg);
-
-// Run an embedded agent turn
-const agentDir = api.runtime.agent.resolveAgentDir(cfg);
-const result = await api.runtime.agent.runEmbeddedAgent({
-  sessionId: "my-plugin:task-1",
-  runId: crypto.randomUUID(),
-  sessionFile: path.join(agentDir, "sessions", "my-plugin-task-1.jsonl"),
-  workspaceDir: api.runtime.agent.resolveAgentWorkspaceDir(cfg),
-  prompt: "Summarize the latest changes",
-  timeoutMs: api.runtime.agent.resolveAgentTimeoutMs(cfg),
-});
-```
-
-`runEmbeddedAgent(...)` is the neutral helper for starting a normal OpenClaw
-agent turn from plugin code. It uses the same provider/model resolution and
-agent-harness selection as channel-triggered replies.
-
-`runEmbeddedPiAgent(...)` remains as a compatibility alias.
-
-**Session store helpers** are under `api.runtime.agent.session`:
-
-```typescript
-const storePath = api.runtime.agent.session.resolveStorePath(cfg);
-const store = api.runtime.agent.session.loadSessionStore(cfg);
-await api.runtime.agent.session.saveSessionStore(cfg, store);
-const filePath = api.runtime.agent.session.resolveSessionFilePath(cfg, sessionId);
-```
-
-### `api.runtime.agent.defaults`
-
-Default model and provider constants:
-
-```typescript
-const model = api.runtime.agent.defaults.model; // e.g. "anthropic/claude-sonnet-4-6"
-const provider = api.runtime.agent.defaults.provider; // e.g. "anthropic"
-```
-
-### `api.runtime.subagent`
-
-Launch and manage background subagent runs.
-
-```typescript
-// Start a subagent run
-const { runId } = await api.runtime.subagent.run({
-  sessionKey: "agent:main:subagent:search-helper",
-  message: "Expand this query into focused follow-up searches.",
-  provider: "openai", // optional override
-  model: "gpt-4.1-mini", // optional override
-  deliver: false,
-});
-
-// Wait for completion
-const result = await api.runtime.subagent.waitForRun({ runId, timeoutMs: 30000 });
-
-// Read session messages
-const { messages } = await api.runtime.subagent.getSessionMessages({
-  sessionKey: "agent:main:subagent:search-helper",
-  limit: 10,
-});
-
-// Delete a session
-await api.runtime.subagent.deleteSession({
-  sessionKey: "agent:main:subagent:search-helper",
-});
-```
-
-<Warning>
-  Model overrides (`provider`/`model`) require operator opt-in via
-  `plugins.entries.<id>.subagent.allowModelOverride: true` in config.
-  Untrusted plugins can still run subagents, but override requests are rejected.
-</Warning>
-
-### `api.runtime.taskFlow`
-
-Bind a Task Flow runtime to an existing OpenClaw session key or trusted tool
-context, then create and manage Task Flows without passing an owner on every call.
-
-```typescript
-const taskFlow = api.runtime.taskFlow.fromToolContext(ctx);
-
-const created = taskFlow.createManaged({
-  controllerId: "my-plugin/review-batch",
-  goal: "Review new pull requests",
-});
-
-const child = taskFlow.runTask({
-  flowId: created.flowId,
-  runtime: "acp",
-  childSessionKey: "agent:main:subagent:reviewer",
-  task: "Review PR #123",
-  status: "running",
-  startedAt: Date.now(),
-});
-
-const waiting = taskFlow.setWaiting({
-  flowId: created.flowId,
-  expectedRevision: created.revision,
-  currentStep: "await-human-reply",
-  waitJson: { kind: "reply", channel: "telegram" },
-});
-```
-
-Use `bindSession({ sessionKey, requesterOrigin })` when you already have a
-trusted OpenClaw session key from your own binding layer. Do not bind from raw
-user input.
-
-### `api.runtime.tts`
-
-Text-to-speech synthesis.
-
-```typescript
-// Standard TTS
-const clip = await api.runtime.tts.textToSpeech({
-  text: "Hello from OpenClaw",
-  cfg: api.config,
-});
-
-// Telephony-optimized TTS
-const telephonyClip = await api.runtime.tts.textToSpeechTelephony({
-  text: "Hello from OpenClaw",
-  cfg: api.config,
-});
-
-// List available voices
-const voices = await api.runtime.tts.listVoices({
-  provider: "elevenlabs",
-  cfg: api.config,
-});
-```
-
-Uses core `messages.tts` configuration and provider selection. Returns PCM audio
-buffer + sample rate.
-
-### `api.runtime.mediaUnderstanding`
-
-Image, audio, and video analysis.
-
-```typescript
-// Describe an image
-const image = await api.runtime.mediaUnderstanding.describeImageFile({
-  filePath: "/tmp/inbound-photo.jpg",
-  cfg: api.config,
-  agentDir: "/tmp/agent",
-});
-
-// Transcribe audio
-const { text } = await api.runtime.mediaUnderstanding.transcribeAudioFile({
-  filePath: "/tmp/inbound-audio.ogg",
-  cfg: api.config,
-  mime: "audio/ogg", // optional, for when MIME cannot be inferred
-});
-
-// Describe a video
-const video = await api.runtime.mediaUnderstanding.describeVideoFile({
-  filePath: "/tmp/inbound-video.mp4",
-  cfg: api.config,
-});
-
-// Generic file analysis
-const result = await api.runtime.mediaUnderstanding.runFile({
-  filePath: "/tmp/inbound-file.pdf",
-  cfg: api.config,
-});
-```
-
-Returns `{ text: undefined }` when no output is produced (e.g. skipped input).
-
-<Info>
-  `api.runtime.stt.transcribeAudioFile(...)` remains as a compatibility alias
-  for `api.runtime.mediaUnderstanding.transcribeAudioFile(...)`.
-</Info>
-
-### `api.runtime.imageGeneration`
-
-Image generation.
-
-```typescript
-const result = await api.runtime.imageGeneration.generate({
-  prompt: "A robot painting a sunset",
-  cfg: api.config,
-});
-
-const providers = api.runtime.imageGeneration.listProviders({ cfg: api.config });
-```
-
-### `api.runtime.webSearch`
-
-Web search.
-
-```typescript
-const providers = api.runtime.webSearch.listProviders({ config: api.config });
-
-const result = await api.runtime.webSearch.search({
-  config: api.config,
-  args: { query: "OpenClaw plugin SDK", count: 5 },
-});
-```
-
-### `api.runtime.media`
-
-Low-level media utilities.
-
-```typescript
-const webMedia = await api.runtime.media.loadWebMedia(url);
-const mime = await api.runtime.media.detectMime(buffer);
-const kind = api.runtime.media.mediaKindFromMime("image/jpeg"); // "image"
-const isVoice = api.runtime.media.isVoiceCompatibleAudio(filePath);
-const metadata = await api.runtime.media.getImageMetadata(filePath);
-const resized = await api.runtime.media.resizeToJpeg(buffer, { maxWidth: 800 });
-```
-
-### `api.runtime.config`
-
-Config load and write.
-
-```typescript
-const cfg = await api.runtime.config.loadConfig();
-await api.runtime.config.writeConfigFile(cfg);
-```
-
-### `api.runtime.system`
-
-System-level utilities.
-
-```typescript
-await api.runtime.system.enqueueSystemEvent(event);
-api.runtime.system.requestHeartbeatNow();
-const output = await api.runtime.system.runCommandWithTimeout(cmd, args, opts);
-const hint = api.runtime.system.formatNativeDependencyHint(pkg);
-```
-
-### `api.runtime.events`
-
-Event subscriptions.
-
-```typescript
-api.runtime.events.onAgentEvent((event) => {
-  /* ... */
-});
-api.runtime.events.onSessionTranscriptUpdate((update) => {
-  /* ... */
-});
-```
-
-### `api.runtime.logging`
-
-Logging.
-
-```typescript
-const verbose = api.runtime.logging.shouldLogVerbose();
-const childLogger = api.runtime.logging.getChildLogger({ plugin: "my-plugin" }, { level: "debug" });
-```
-
-### `api.runtime.modelAuth`
-
-Model and provider auth resolution.
-
-```typescript
-const auth = await api.runtime.modelAuth.getApiKeyForModel({ model, cfg });
-const providerAuth = await api.runtime.modelAuth.resolveApiKeyForProvider({
-  provider: "openai",
-  cfg,
-});
-```
-
-### `api.runtime.state`
-
-State directory resolution.
-
-```typescript
-const stateDir = api.runtime.state.resolveStateDir();
-```
-
-### `api.runtime.tools`
-
-Memory tool factories and CLI.
-
-```typescript
-const getTool = api.runtime.tools.createMemoryGetTool(/* ... */);
-const searchTool = api.runtime.tools.createMemorySearchTool(/* ... */);
-api.runtime.tools.registerMemoryCli(/* ... */);
-```
-
-### `api.runtime.channel`
-
-Channel-specific runtime helpers (available when a channel plugin is loaded).
-
-`api.runtime.channel.mentions` is the shared inbound mention-policy surface for
-bundled channel plugins that use runtime injection:
-
-```typescript
-const mentionMatch = api.runtime.channel.mentions.matchesMentionWithExplicit(text, {
-  mentionRegexes,
-  mentionPatterns,
-});
-
-const decision = api.runtime.channel.mentions.resolveInboundMentionDecision({
-  facts: {
-    canDetectMention: true,
-    wasMentioned: mentionMatch.matched,
-    implicitMentionKinds: api.runtime.channel.mentions.implicitMentionKindWhen(
-      "reply_to_bot",
-      isReplyToBot,
-    ),
-  },
-  policy: {
-    isGroup,
-    requireMention,
-    allowTextCommands,
-    hasControlCommand,
-    commandAuthorized,
-  },
-});
-```
-
-Available mention helpers:
-
-- `buildMentionRegexes`
-- `matchesMentionPatterns`
-- `matchesMentionWithExplicit`
-- `implicitMentionKindWhen`
-- `resolveInboundMentionDecision`
-
-`api.runtime.channel.mentions` intentionally does not expose the older
-`resolveMentionGating*` compatibility helpers. Prefer the normalized
-`{ facts, policy }` path.
-
-## Storing runtime references
-
-Use `createPluginRuntimeStore` to store the runtime reference for use outside
-the `register` callback:
-
-```typescript
-import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
-import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
-
-const store = createPluginRuntimeStore<PluginRuntime>("my-plugin runtime not initialized");
-
-// In your entry point
-export default defineChannelPluginEntry({
-  id: "my-plugin",
-  name: "My Plugin",
-  description: "Example",
-  plugin: myPlugin,
-  setRuntime: store.setRuntime,
-});
-
-// In other files
-export function getRuntime() {
-  return store.getRuntime(); // throws if not initialized
+import { randomUUID } from "node:crypto";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { updatePairedDeviceMetadata } from "../infra/device-pairing.js";
+import { formatErrorMessage } from "../infra/errors.js";
+import { updatePairedNodeMetadata } from "../infra/node-pairing.js";
+import type { PromptImageOrderEntry } from "../media/prompt-image-order.js";
+import {
+NODE_PRESENCE_ALIVE_EVENT,
+normalizeNodePresenceAliveReason,
+} from "../shared/node-presence.js";
+import {
+normalizeLowercaseStringOrEmpty,
+normalizeOptionalString,
+} from "../shared/string-coerce.js";
+import type { NodeEvent, NodeEventContext } from "./server-node-events-types.js";
+import {
+agentCommandFromIngress,
+buildOutboundSessionContext,
+createOutboundSendDeps,
+defaultRuntime,
+deleteMediaBuffer,
+deliverOutboundPayloads,
+enqueueSystemEvent,
+formatForLog,
+getRuntimeConfig,
+loadOrCreateDeviceIdentity,
+loadSessionEntry,
+migrateAndPruneGatewaySessionStoreKey,
+normalizeChannelId,
+normalizeMainKey,
+normalizeRpcAttachmentsToChatAttachments,
+parseMessageWithAttachments,
+registerApnsRegistration,
+requestHeartbeat,
+resolveChatAttachmentMaxBytes,
+resolveGatewayModelSupportsImages,
+resolveOutboundTarget,
+resolveSessionAgentId,
+resolveSessionModelRef,
+sanitizeInboundSystemTags,
+scopedHeartbeatWakeOptions,
+updateSessionStore,
+} from "./server-node-events.runtime.js";
+
+const MAX_EXEC_EVENT_OUTPUT_CHARS = 180;
+const MAX_NOTIFICATION_EVENT_TEXT_CHARS = 120;
+const VOICE_TRANSCRIPT_DEDUPE_WINDOW_MS = 1500;
+const MAX_RECENT_VOICE_TRANSCRIPTS = 200;
+const EXEC_FINISHED_RUN_DEDUPE_WINDOW_MS = 10 _ 60 _ 1000;
+const MAX_RECENT_EXEC_FINISHED_RUNS = 2000;
+const NODE_PRESENCE_PERSIST_MIN_INTERVAL_MS = 60_000;
+const MAX_RECENT_NODE_PRESENCE_KEYS = 1024;
+
+const recentVoiceTranscripts = new Map<string, { fingerprint: string; ts: number }>();
+const recentExecFinishedRuns = new Map<string, number>();
+const recentNodePresencePersistAt = new Map<string, number>();
+
+export type NodeEventHandleResult = {
+ok: true;
+event: string;
+handled: boolean;
+reason?: string;
+};
+
+function normalizeFiniteInteger(value: unknown): number | null {
+return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : null;
 }
 
-export function tryGetRuntime() {
-  return store.tryGetRuntime(); // returns null if not initialized
+function resolveVoiceTranscriptFingerprint(obj: Record<string, unknown>, text: string): string {
+const eventId =
+normalizeOptionalString(obj.eventId) ??
+normalizeOptionalString(obj.providerEventId) ??
+normalizeOptionalString(obj.transcriptId);
+if (eventId) {
+return `event:${eventId}`;
 }
-```
 
-## Other top-level `api` fields
+const callId = normalizeOptionalString(obj.providerCallId) ?? normalizeOptionalString(obj.callId);
+const sequence = normalizeFiniteInteger(obj.sequence) ?? normalizeFiniteInteger(obj.seq);
+if (callId && sequence !== null) {
+return `call-seq:${callId}:${sequence}`;
+}
 
-Beyond `api.runtime`, the API object also provides:
+const eventTimestamp =
+normalizeFiniteInteger(obj.timestamp) ??
+normalizeFiniteInteger(obj.ts) ??
+normalizeFiniteInteger(obj.eventTimestamp);
+if (callId && eventTimestamp !== null) {
+return `call-ts:${callId}:${eventTimestamp}`;
+}
 
-| Field                    | Type                      | Description                                                                                 |
-| ------------------------ | ------------------------- | ------------------------------------------------------------------------------------------- |
-| `api.id`                 | `string`                  | Plugin id                                                                                   |
-| `api.name`               | `string`                  | Plugin display name                                                                         |
-| `api.config`             | `OpenClawConfig`          | Current config snapshot (active in-memory runtime snapshot when available)                  |
-| `api.pluginConfig`       | `Record<string, unknown>` | Plugin-specific config from `plugins.entries.<id>.config`                                   |
-| `api.logger`             | `PluginLogger`            | Scoped logger (`debug`, `info`, `warn`, `error`)                                            |
-| `api.registrationMode`   | `PluginRegistrationMode`  | Current load mode; `"setup-runtime"` is the lightweight pre-full-entry startup/setup window |
-| `api.resolvePath(input)` | `(string) => string`      | Resolve a path relative to the plugin root                                                  |
+if (eventTimestamp !== null) {
+return `timestamp:${eventTimestamp}|text:${text}`;
+}
 
-## Related
+return `text:${text}`;
+}
 
-- [SDK Overview](/plugins/sdk-overview) -- subpath reference
-- [SDK Entry Points](/plugins/sdk-entrypoints) -- `definePluginEntry` options
-- [Plugin Internals](/plugins/architecture) -- capability model and registry
+function shouldDropDuplicateVoiceTranscript(params: {
+sessionKey: string;
+fingerprint: string;
+now: number;
+}): boolean {
+const previous = recentVoiceTranscripts.get(params.sessionKey);
+if (
+previous &&
+previous.fingerprint === params.fingerprint &&
+params.now - previous.ts <= VOICE_TRANSCRIPT_DEDUPE_WINDOW_MS
+) {
+return true;
+}
+recentVoiceTranscripts.set(params.sessionKey, {
+fingerprint: params.fingerprint,
+ts: params.now,
+});
+
+if (recentVoiceTranscripts.size > MAX_RECENT_VOICE_TRANSCRIPTS) {
+const cutoff = params.now - VOICE_TRANSCRIPT_DEDUPE_WINDOW_MS \* 2;
+for (const [key, value] of recentVoiceTranscripts) {
+if (value.ts < cutoff) {
+recentVoiceTranscripts.delete(key);
+}
+if (recentVoiceTranscripts.size <= MAX_RECENT_VOICE_TRANSCRIPTS) {
+break;
+}
+}
+while (recentVoiceTranscripts.size > MAX_RECENT_VOICE_TRANSCRIPTS) {
+const oldestKey = recentVoiceTranscripts.keys().next().value;
+if (oldestKey === undefined) {
+break;
+}
+recentVoiceTranscripts.delete(oldestKey);
+}
+}
+
+return false;
+}
+
+function shouldDropDuplicateExecFinished(params: {
+sessionKey: string;
+runId: string;
+now: number;
+}): boolean {
+const fingerprint = `${params.sessionKey}::${params.runId}`;
+const previousTs = recentExecFinishedRuns.get(fingerprint);
+if (
+typeof previousTs === "number" &&
+params.now - previousTs <= EXEC_FINISHED_RUN_DEDUPE_WINDOW_MS
+) {
+return true;
+}
+
+recentExecFinishedRuns.set(fingerprint, params.now);
+if (recentExecFinishedRuns.size > MAX_RECENT_EXEC_FINISHED_RUNS) {
+const cutoff = params.now - EXEC_FINISHED_RUN_DEDUPE_WINDOW_MS;
+for (const [key, ts] of recentExecFinishedRuns) {
+if (ts < cutoff) {
+recentExecFinishedRuns.delete(key);
+}
+if (recentExecFinishedRuns.size <= MAX_RECENT_EXEC_FINISHED_RUNS) {
+break;
+}
+}
+while (recentExecFinishedRuns.size > MAX_RECENT_EXEC_FINISHED_RUNS) {
+const oldestKey = recentExecFinishedRuns.keys().next().value;
+if (oldestKey === undefined) {
+break;
+}
+recentExecFinishedRuns.delete(oldestKey);
+}
+}
+
+return false;
+}
+
+function pruneBoundedTimestampMap(
+map: Map<string, number>,
+params: { now: number; ttlMs: number; maxEntries: number },
+) {
+if (map.size <= params.maxEntries) {
+return;
+}
+const cutoff = params.now - params.ttlMs;
+for (const [key, ts] of map) {
+if (ts < cutoff) {
+map.delete(key);
+}
+if (map.size <= params.maxEntries) {
+return;
+}
+}
+while (map.size > params.maxEntries) {
+const oldestKey = map.keys().next().value;
+if (oldestKey === undefined) {
+return;
+}
+map.delete(oldestKey);
+}
+}
+
+export function resetNodeEventDeduplicationForTests() {
+recentVoiceTranscripts.clear();
+recentExecFinishedRuns.clear();
+recentNodePresencePersistAt.clear();
+}
+
+export function getRecentNodePresencePersistCountForTests() {
+return recentNodePresencePersistAt.size;
+}
+
+function compactExecEventOutput(raw: string) {
+const normalized = raw.replace(/\s+/g, " ").trim();
+if (!normalized) {
+return "";
+}
+if (normalized.length <= MAX_EXEC_EVENT_OUTPUT_CHARS) {
+return normalized;
+}
+const safe = Math.max(1, MAX_EXEC_EVENT_OUTPUT_CHARS - 1);
+return `${normalized.slice(0, safe)}…`;
+}
+
+function compactNotificationEventText(raw: string) {
+const normalized = raw.replace(/\s+/g, " ").trim();
+if (!normalized) {
+return "";
+}
+if (normalized.length <= MAX_NOTIFICATION_EVENT_TEXT_CHARS) {
+return normalized;
+}
+const safe = Math.max(1, MAX_NOTIFICATION_EVENT_TEXT_CHARS - 1);
+return `${normalized.slice(0, safe)}…`;
+}
+
+type LoadedSessionEntry = ReturnType<typeof loadSessionEntry>;
+
+async function touchSessionStore(params: {
+cfg: OpenClawConfig;
+sessionKey: string;
+storePath: LoadedSessionEntry["storePath"];
+canonicalKey: LoadedSessionEntry["canonicalKey"];
+entry: LoadedSessionEntry["entry"];
+sessionId: string;
+now: number;
+}) {
+const { storePath } = params;
+if (!storePath) {
+return;
+}
+await updateSessionStore(storePath, (store) => {
+const { primaryKey } = migrateAndPruneGatewaySessionStoreKey({
+cfg: params.cfg,
+key: params.sessionKey,
+store,
+});
+store[primaryKey] = {
+...store[primaryKey],
+sessionId: params.sessionId,
+updatedAt: params.now,
+thinkingLevel: params.entry?.thinkingLevel,
+fastMode: params.entry?.fastMode,
+verboseLevel: params.entry?.verboseLevel,
+reasoningLevel: params.entry?.reasoningLevel,
+systemSent: params.entry?.systemSent,
+sendPolicy: params.entry?.sendPolicy,
+lastChannel: params.entry?.lastChannel,
+lastTo: params.entry?.lastTo,
+lastAccountId: params.entry?.lastAccountId,
+lastThreadId: params.entry?.lastThreadId,
+};
+});
+}
+
+function queueSessionStoreTouch(params: {
+ctx: NodeEventContext;
+cfg: OpenClawConfig;
+sessionKey: string;
+storePath: LoadedSessionEntry["storePath"];
+canonicalKey: LoadedSessionEntry["canonicalKey"];
+entry: LoadedSessionEntry["entry"];
+sessionId: string;
+now: number;
+}) {
+void touchSessionStore({
+cfg: params.cfg,
+sessionKey: params.sessionKey,
+storePath: params.storePath,
+canonicalKey: params.canonicalKey,
+entry: params.entry,
+sessionId: params.sessionId,
+now: params.now,
+}).catch((err) => {
+params.ctx.logGateway.warn("voice session-store update failed: " + formatForLog(err));
+});
+}
+
+function parseSessionKeyFromPayloadJSON(payloadJSON: string): string | null {
+let payload: unknown;
+try {
+payload = JSON.parse(payloadJSON) as unknown;
+} catch {
+return null;
+}
+if (typeof payload !== "object" || payload === null) {
+return null;
+}
+const obj = payload as Record<string, unknown>;
+const sessionKey = normalizeOptionalString(obj.sessionKey) ?? "";
+return sessionKey.length > 0 ? sessionKey : null;
+}
+
+function parsePayloadObject(payloadJSON?: string | null): Record<string, unknown> | null {
+if (!payloadJSON) {
+return null;
+}
+let payload: unknown;
+try {
+payload = JSON.parse(payloadJSON) as unknown;
+} catch {
+return null;
+}
+return typeof payload === "object" && payload !== null
+? (payload as Record<string, unknown>)
+: null;
+}
+
+async function sendReceiptAck(params: {
+cfg: OpenClawConfig;
+deps: NodeEventContext["deps"];
+sessionKey: string;
+channel: string;
+to: string;
+text: string;
+}) {
+const resolved = resolveOutboundTarget({
+channel: params.channel,
+to: params.to,
+cfg: params.cfg,
+mode: "explicit",
+});
+if (!resolved.ok) {
+throw new Error(String(resolved.error));
+}
+const session = buildOutboundSessionContext({
+cfg: params.cfg,
+sessionKey: params.sessionKey,
+});
+await deliverOutboundPayloads({
+cfg: params.cfg,
+channel: params.channel,
+to: resolved.to,
+payloads: [{ text: params.text }],
+session,
+bestEffort: true,
+deps: createOutboundSendDeps(params.deps),
+});
+}
+
+export const handleNodeEvent = async (
+ctx: NodeEventContext,
+nodeId: string,
+evt: NodeEvent,
+opts?: { deviceId?: string },
+): Promise<NodeEventHandleResult | undefined> => {
+switch (evt.event) {
+case "voice.transcript": {
+const obj = parsePayloadObject(evt.payloadJSON);
+if (!obj) {
+return undefined;
+}
+const text = normalizeOptionalString(obj.text) ?? "";
+if (!text) {
+return undefined;
+}
+if (text.length > 20_000) {
+return undefined;
+}
+const sessionKeyRaw = normalizeOptionalString(obj.sessionKey) ?? "";
+const cfg = getRuntimeConfig();
+const rawMainKey = normalizeMainKey(cfg.session?.mainKey);
+const sessionKey = sessionKeyRaw.length > 0 ? sessionKeyRaw : rawMainKey;
+const { storePath, entry, canonicalKey } = loadSessionEntry(sessionKey);
+const now = Date.now();
+const fingerprint = resolveVoiceTranscriptFingerprint(obj, text);
+if (shouldDropDuplicateVoiceTranscript({ sessionKey: canonicalKey, fingerprint, now })) {
+return undefined;
+}
+const sessionId = entry?.sessionId ?? randomUUID();
+queueSessionStoreTouch({
+ctx,
+cfg,
+sessionKey,
+storePath,
+canonicalKey,
+entry,
+sessionId,
+now,
+});
+const runId = randomUUID();
+
+      // Ensure chat UI clients refresh when this run completes (even though it wasn't started via chat.send).
+      // This maps agent bus events (keyed by per-turn runId) to chat events (keyed by clientRunId).
+      ctx.addChatRun(runId, {
+        sessionKey: canonicalKey,
+        clientRunId: `voice-${randomUUID()}`,
+      });
+
+      void agentCommandFromIngress(
+        {
+          runId,
+          message: text,
+          sessionId,
+          sessionKey: canonicalKey,
+          thinking: "low",
+          deliver: false,
+          messageChannel: "node",
+          inputProvenance: {
+            kind: "external_user",
+            sourceChannel: "voice",
+            sourceTool: "gateway.voice.transcript",
+          },
+          senderIsOwner: false,
+          allowModelOverride: false,
+        },
+        defaultRuntime,
+        ctx.deps,
+      ).catch((err) => {
+        ctx.logGateway.warn(`agent failed node=${nodeId}: ${formatForLog(err)}`);
+      });
+      return undefined;
+    }
+    case "agent.request": {
+      if (!evt.payloadJSON) {
+        return undefined;
+      }
+      type AgentDeepLink = {
+        message?: string;
+        sessionKey?: string | null;
+        thinking?: string | null;
+        deliver?: boolean;
+        attachments?: Array<{
+          type?: string;
+          mimeType?: string;
+          fileName?: string;
+          content?: unknown;
+        }> | null;
+        receipt?: boolean;
+        receiptText?: string | null;
+        to?: string | null;
+        channel?: string | null;
+        timeoutSeconds?: number | null;
+        key?: string | null;
+      };
+
+      let link: AgentDeepLink | null = null;
+      try {
+        link = JSON.parse(evt.payloadJSON) as AgentDeepLink;
+      } catch {
+        return undefined;
+      }
+
+      const sessionKeyRaw = (link?.sessionKey ?? "").trim();
+      const sessionKey = sessionKeyRaw.length > 0 ? sessionKeyRaw : `node-${nodeId}`;
+      const cfg = getRuntimeConfig();
+      const { storePath, entry, canonicalKey } = loadSessionEntry(sessionKey);
+
+      let message = (link?.message ?? "").trim();
+      const normalizedAttachments = normalizeRpcAttachmentsToChatAttachments(
+        link?.attachments ?? undefined,
+      );
+      let images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+      let imageOrder: PromptImageOrderEntry[] = [];
+      if (!message && normalizedAttachments.length === 0) {
+        return undefined;
+      }
+      if (message.length > 20_000) {
+        return undefined;
+      }
+      if (normalizedAttachments.length > 0) {
+        const sessionAgentId = resolveSessionAgentId({ sessionKey, config: cfg });
+        const modelRef = resolveSessionModelRef(cfg, entry, sessionAgentId);
+        const supportsInlineImages = await resolveGatewayModelSupportsImages({
+          loadGatewayModelCatalog: ctx.loadGatewayModelCatalog,
+          provider: modelRef.provider,
+          model: modelRef.model,
+        });
+        try {
+          const parsed = await parseMessageWithAttachments(message, normalizedAttachments, {
+            maxBytes: resolveChatAttachmentMaxBytes(cfg),
+            log: ctx.logGateway,
+            supportsInlineImages,
+            // server-node-events dispatches via agentCommandFromIngress which
+            // has no ctx.MediaPaths wiring; reject non-image attachments
+            // explicitly rather than saving them where the agent cannot reach them.
+            acceptNonImage: false,
+          });
+          message = parsed.message.trim();
+          images = parsed.images;
+          imageOrder = parsed.imageOrder;
+          if (message.length > 20_000) {
+            ctx.logGateway.warn(
+              `agent.request message exceeds limit after attachment parsing (length=${message.length})`,
+            );
+            if (parsed.offloadedRefs && parsed.offloadedRefs.length > 0) {
+              for (const ref of parsed.offloadedRefs) {
+                try {
+                  await deleteMediaBuffer(ref.id);
+                } catch (cleanupErr) {
+                  ctx.logGateway.warn(
+                    `Failed to cleanup orphaned media ${ref.id}: ${formatErrorMessage(cleanupErr)}`,
+                  );
+                }
+              }
+            }
+            return undefined;
+          }
+        } catch (err) {
+          ctx.logGateway.warn(`agent.request attachment parse failed: ${formatErrorMessage(err)}`);
+          return undefined;
+        }
+      }
+
+      if (!message && images.length === 0) {
+        return undefined;
+      }
+
+      const channelRaw = normalizeOptionalString(link?.channel) ?? "";
+      let channel = normalizeChannelId(channelRaw) ?? undefined;
+      let to = normalizeOptionalString(link?.to);
+      const deliverRequested = Boolean(link?.deliver);
+      const wantsReceipt = Boolean(link?.receipt);
+      const receiptText =
+        normalizeOptionalString(link?.receiptText) ||
+        "Just received your iOS share + request, working on it.";
+
+      const now = Date.now();
+      const sessionId = entry?.sessionId ?? randomUUID();
+      await touchSessionStore({ cfg, sessionKey, storePath, canonicalKey, entry, sessionId, now });
+
+      if (deliverRequested && (!channel || !to)) {
+        const entryChannel =
+          typeof entry?.lastChannel === "string"
+            ? normalizeChannelId(entry.lastChannel)
+            : undefined;
+        const entryTo = normalizeOptionalString(entry?.lastTo) ?? "";
+        if (!channel && entryChannel) {
+          channel = entryChannel;
+        }
+        if (!to && entryTo) {
+          to = entryTo;
+        }
+      }
+      const deliver = deliverRequested && Boolean(channel && to);
+      const deliveryChannel = deliver ? channel : undefined;
+      const deliveryTo = deliver ? to : undefined;
+      if (deliverRequested && !deliver) {
+        ctx.logGateway.warn(
+          `agent delivery disabled node=${nodeId}: missing session delivery route (channel=${channel ?? "-"} to=${to ?? "-"})`,
+        );
+      }
+
+      if (wantsReceipt && deliveryChannel && deliveryTo) {
+        void sendReceiptAck({
+          cfg,
+          deps: ctx.deps,
+          sessionKey: canonicalKey,
+          channel: deliveryChannel,
+          to: deliveryTo,
+          text: receiptText,
+        }).catch((err) => {
+          ctx.logGateway.warn(`agent receipt failed node=${nodeId}: ${formatForLog(err)}`);
+        });
+      } else if (wantsReceipt) {
+        ctx.logGateway.warn(
+          `agent receipt skipped node=${nodeId}: missing delivery route (channel=${deliveryChannel ?? "-"} to=${deliveryTo ?? "-"})`,
+        );
+      }
+
+      void agentCommandFromIngress(
+        {
+          runId: sessionId,
+          message,
+          images,
+          imageOrder,
+          sessionId,
+          sessionKey: canonicalKey,
+          thinking: link?.thinking ?? undefined,
+          deliver,
+          to: deliveryTo,
+          channel: deliveryChannel,
+          timeout:
+            typeof link?.timeoutSeconds === "number" ? link.timeoutSeconds.toString() : undefined,
+          messageChannel: "node",
+          senderIsOwner: false,
+          allowModelOverride: false,
+        },
+        defaultRuntime,
+        ctx.deps,
+      ).catch((err) => {
+        ctx.logGateway.warn(`agent failed node=${nodeId}: ${formatForLog(err)}`);
+      });
+      return undefined;
+    }
+    case "notifications.changed": {
+      const obj = parsePayloadObject(evt.payloadJSON);
+      if (!obj) {
+        return undefined;
+      }
+      const change = normalizeOptionalString(obj.change)
+        ? normalizeLowercaseStringOrEmpty(obj.change)
+        : undefined;
+      if (change !== "posted" && change !== "removed") {
+        return undefined;
+      }
+      const keyRaw = normalizeOptionalString(obj.key);
+      if (!keyRaw) {
+        return undefined;
+      }
+      const key = sanitizeInboundSystemTags(keyRaw);
+      const sessionKeyRaw = normalizeOptionalString(obj.sessionKey) ?? `node-${nodeId}`;
+      const { canonicalKey: sessionKey } = loadSessionEntry(sessionKeyRaw);
+      const packageNameRaw = normalizeOptionalString(obj.packageName);
+      const packageName = packageNameRaw ? sanitizeInboundSystemTags(packageNameRaw) : null;
+      const title = compactNotificationEventText(
+        sanitizeInboundSystemTags(normalizeOptionalString(obj.title) ?? ""),
+      );
+      const text = compactNotificationEventText(
+        sanitizeInboundSystemTags(normalizeOptionalString(obj.text) ?? ""),
+      );
+
+      let summary = `Notification ${change} (node=${nodeId} key=${key}`;
+      if (packageName) {
+        summary += ` package=${packageName}`;
+      }
+      summary += ")";
+      if (change === "posted") {
+        const messageParts = [title, text].filter(Boolean);
+        if (messageParts.length > 0) {
+          summary += `: ${messageParts.join(" - ")}`;
+        }
+      }
+
+      const queued = enqueueSystemEvent(summary, {
+        sessionKey,
+        contextKey: `notification:${keyRaw}`,
+        trusted: false,
+      });
+      if (queued) {
+        requestHeartbeat({
+          source: "notifications-event",
+          intent: "event",
+          reason: "notifications-event",
+          sessionKey,
+        });
+      }
+      return undefined;
+    }
+    case "chat.subscribe": {
+      if (!evt.payloadJSON) {
+        return undefined;
+      }
+      const sessionKey = parseSessionKeyFromPayloadJSON(evt.payloadJSON);
+      if (!sessionKey) {
+        return undefined;
+      }
+      ctx.nodeSubscribe(nodeId, sessionKey);
+      return undefined;
+    }
+    case "chat.unsubscribe": {
+      if (!evt.payloadJSON) {
+        return undefined;
+      }
+      const sessionKey = parseSessionKeyFromPayloadJSON(evt.payloadJSON);
+      if (!sessionKey) {
+        return undefined;
+      }
+      ctx.nodeUnsubscribe(nodeId, sessionKey);
+      return undefined;
+    }
+    case "exec.started":
+    case "exec.finished":
+    case "exec.denied": {
+      const obj = parsePayloadObject(evt.payloadJSON);
+      if (!obj) {
+        return undefined;
+      }
+      const sessionKeyRaw = normalizeOptionalString(obj.sessionKey) ?? `node-${nodeId}`;
+      if (!sessionKeyRaw) {
+        return undefined;
+      }
+      const { canonicalKey: sessionKey } = loadSessionEntry(sessionKeyRaw);
+
+      // Respect tools.exec.notifyOnExit setting (default: true)
+      // When false, skip system event notifications for node exec events.
+      const cfg = getRuntimeConfig();
+      const notifyOnExit = cfg.tools?.exec?.notifyOnExit !== false;
+      if (!notifyOnExit) {
+        return undefined;
+      }
+      if (obj.suppressNotifyOnExit === true) {
+        return undefined;
+      }
+
+      const runId = normalizeOptionalString(obj.runId) ?? "";
+      const command = sanitizeInboundSystemTags(normalizeOptionalString(obj.command) ?? "");
+      const exitCode =
+        typeof obj.exitCode === "number" && Number.isFinite(obj.exitCode)
+          ? obj.exitCode
+          : undefined;
+      const timedOut = obj.timedOut === true;
+      const output = sanitizeInboundSystemTags(normalizeOptionalString(obj.output) ?? "");
+      const reason = sanitizeInboundSystemTags(normalizeOptionalString(obj.reason) ?? "");
+
+      let text = "";
+      if (evt.event === "exec.started") {
+        text = `Exec started (node=${nodeId}${runId ? ` id=${runId}` : ""})`;
+        if (command) {
+          text += `: ${command}`;
+        }
+      } else if (evt.event === "exec.finished") {
+        const exitLabel = timedOut ? "timeout" : `code ${exitCode ?? "?"}`;
+        const compactOutput = compactExecEventOutput(output);
+        const shouldNotify = timedOut || exitCode !== 0 || compactOutput.length > 0;
+        if (!shouldNotify) {
+          return undefined;
+        }
+        if (
+          runId &&
+          shouldDropDuplicateExecFinished({
+            sessionKey,
+            runId,
+            now: Date.now(),
+          })
+        ) {
+          return undefined;
+        }
+        text = `Exec finished (node=${nodeId}${runId ? ` id=${runId}` : ""}, ${exitLabel})`;
+        if (compactOutput) {
+          text += `\n${compactOutput}`;
+        }
+      } else {
+        text = `Exec denied (node=${nodeId}${runId ? ` id=${runId}` : ""}${reason ? `, ${reason}` : ""})`;
+        if (command) {
+          text += `: ${command}`;
+        }
+      }
+
+      const queued = enqueueSystemEvent(text, {
+        sessionKey,
+        contextKey: runId ? `exec:${runId}` : "exec",
+        trusted: false,
+      });
+      if (queued) {
+        // Scope wakes only for canonical agent sessions. Synthetic node-* fallback
+        // keys should keep legacy unscoped behavior so enabled non-main heartbeat
+        // agents still run when no explicit agent session is provided.
+        requestHeartbeat(
+          scopedHeartbeatWakeOptions(sessionKey, {
+            source: "exec-event",
+            intent: "event",
+            reason: "exec-event",
+            coalesceMs: 0,
+          }),
+        );
+      }
+      return undefined;
+    }
+    case "push.apns.register": {
+      const obj = parsePayloadObject(evt.payloadJSON);
+      if (!obj) {
+        return undefined;
+      }
+      const transport = normalizeLowercaseStringOrEmpty(obj.transport) || "direct";
+      const topic = typeof obj.topic === "string" ? obj.topic : "";
+      const environment = obj.environment;
+      try {
+        if (transport === "relay") {
+          const gatewayDeviceId = normalizeOptionalString(obj.gatewayDeviceId) ?? "";
+          const currentGatewayDeviceId = loadOrCreateDeviceIdentity().deviceId;
+          if (!gatewayDeviceId || gatewayDeviceId !== currentGatewayDeviceId) {
+            ctx.logGateway.warn(
+              `push relay register rejected node=${nodeId}: gateway identity mismatch`,
+            );
+            return undefined;
+          }
+          await registerApnsRegistration({
+            nodeId,
+            transport: "relay",
+            relayHandle: typeof obj.relayHandle === "string" ? obj.relayHandle : "",
+            sendGrant: typeof obj.sendGrant === "string" ? obj.sendGrant : "",
+            installationId: typeof obj.installationId === "string" ? obj.installationId : "",
+            topic,
+            environment,
+            distribution: obj.distribution,
+            tokenDebugSuffix: obj.tokenDebugSuffix,
+          });
+        } else {
+          await registerApnsRegistration({
+            nodeId,
+            transport: "direct",
+            token: typeof obj.token === "string" ? obj.token : "",
+            topic,
+            environment,
+          });
+        }
+      } catch (err) {
+        ctx.logGateway.warn(`push apns register failed node=${nodeId}: ${formatForLog(err)}`);
+      }
+      return undefined;
+    }
+    case NODE_PRESENCE_ALIVE_EVENT: {
+      const obj = parsePayloadObject(evt.payloadJSON);
+      if (!obj) {
+        return { ok: true, event: evt.event, handled: false, reason: "invalid_payload" };
+      }
+      const deviceId = normalizeOptionalString(opts?.deviceId);
+      if (!deviceId) {
+        return { ok: true, event: evt.event, handled: false, reason: "missing_device_identity" };
+      }
+      const now = Date.now();
+      const lastPersistedAt = recentNodePresencePersistAt.get(deviceId) ?? 0;
+      if (now - lastPersistedAt < NODE_PRESENCE_PERSIST_MIN_INTERVAL_MS) {
+        return { ok: true, event: evt.event, handled: true, reason: "throttled" };
+      }
+
+      const lastSeenReason = normalizeNodePresenceAliveReason(obj.trigger);
+      try {
+        const [nodeUpdated, deviceUpdated] = await Promise.all([
+          updatePairedNodeMetadata(nodeId, {
+            lastSeenAtMs: now,
+            lastSeenReason,
+          }),
+          updatePairedDeviceMetadata(deviceId, {
+            lastSeenAtMs: now,
+            lastSeenReason,
+          }),
+        ]);
+        if (!nodeUpdated && !deviceUpdated) {
+          return { ok: true, event: evt.event, handled: false, reason: "unpaired" };
+        }
+        recentNodePresencePersistAt.set(deviceId, now);
+        pruneBoundedTimestampMap(recentNodePresencePersistAt, {
+          now,
+          ttlMs: NODE_PRESENCE_PERSIST_MIN_INTERVAL_MS * 10,
+          maxEntries: MAX_RECENT_NODE_PRESENCE_KEYS,
+        });
+        return { ok: true, event: evt.event, handled: true, reason: "persisted" };
+      } catch (err) {
+        ctx.logGateway.warn(`node presence alive failed node=${nodeId}: ${formatForLog(err)}`);
+        return { ok: true, event: evt.event, handled: false, reason: "persist_failed" };
+      }
+    }
+    default:
+      return undefined;
+
+}
+};
